@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Захват штаба — Танчики</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #14170f;
+    color: #e8e4d8;
+    font-family: 'Courier New', Courier, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  #wrap {
+    max-width: 560px;
+    padding: 20px 16px 32px;
+    box-sizing: border-box;
+  }
+  h1 {
+    font-size: 21px;
+    font-weight: normal;
+    letter-spacing: 1px;
+    color: #d9a441;
+    margin: 0 0 14px;
+    text-align: center;
+  }
+  canvas {
+    background: #232819;
+    border: 3px solid #4a4e3a;
+    display: block;
+    image-rendering: pixelated;
+    max-width: 100%;
+    height: auto;
+  }
+  #hint {
+    font-size: 13px;
+    color: #9aa085;
+    margin-top: 12px;
+    line-height: 1.7;
+    text-align: center;
+  }
+  #hint b { color: #cfd2c2; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>ЗАХВАТ ШТАБА — 10 УРОВНЕЙ</h1>
+  <canvas id="game" width="520" height="564"></canvas>
+  <p id="hint">
+    <b>Стрелки</b> или <b>WASD</b> — движение &nbsp;•&nbsp; <b>Пробел</b> — выстрел &nbsp;•&nbsp; <b>R</b> — начать заново<br>
+    Доберись до жёлтого штаба врага и продержись там до заполнения шкалы захвата. С каждым уровнем врагов больше, они быстрее и злее.
+  </p>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ---------- Constants ----------
+const TILE = 40, COLS = 13, ROWS = 13, HUD_H = 44;
+const MAX_LIVES = 3;
+const TOTAL_LEVELS = 10;
+const CAPTURE_TIME = 3000;
+const PLAYER_INVULN_TIME = 1500;
+const ENEMY_RESPAWN_DELAY = 1500;
+
+const DIRS = {
+  up:    {dx: 0, dy: -1},
+  down:  {dx: 0, dy: 1},
+  left:  {dx: -1, dy: 0},
+  right: {dx: 1, dy: 0}
+};
+
+const BASE_COL = 6, BASE_ROW = 1;
+const PLAYER_SPAWN = [6, 11];
+const ENEMY_SPAWNS = [[1,1],[11,1],[6,3],[3,3],[9,3],[1,5],[11,5]];
+
+// ---------- Seeded RNG ----------
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Level config: difficulty grows with level ----------
+function levelConfig(n) {
+  return {
+    enemyCount: Math.min(2 + Math.floor((n - 1) / 2), 6),
+    enemySpeed: 1.3 + (n - 1) * 0.08,
+    shootMin: Math.max(1800 - (n - 1) * 120, 600),
+    shootMax: Math.max(2600 - (n - 1) * 140, 1000),
+    aiMin: Math.max(900 - (n - 1) * 30, 500),
+    aiMax: Math.max(1500 - (n - 1) * 40, 800),
+    extraBricks: Math.min(2 + n * 2, 24),
+    steelTierMid: n >= 4,
+    steelTierHigh: n >= 7
+  };
+}
+
+// ---------- Map ----------
+// Tile types: 0 empty, 1 steel (indestructible), 2 brick (destructible), 3 enemy base
+function baseTemplate() {
+  const g = [];
+  for (let r = 0; r < ROWS; r++) g.push(new Array(COLS).fill(0));
+  for (let c = 0; c < COLS; c++) { g[0][c] = 1; g[ROWS - 1][c] = 1; }
+  for (let r = 0; r < ROWS; r++) { g[r][0] = 1; g[r][COLS - 1] = 1; }
+
+  const brick = (c, r) => { g[r][c] = 2; };
+  const steel = (c, r) => { g[r][c] = 1; };
+
+  [[2,3],[2,4],[2,5],[10,3],[10,4],[10,5],
+   [2,7],[2,8],[2,9],[10,7],[10,8],[10,9],
+   [4,3],[8,3],[4,9],[8,9],
+   [5,6],[6,6],[7,6]].forEach(([c,r]) => brick(c,r));
+
+  [[4,1],[8,1],[4,2],[8,2]].forEach(([c,r]) => steel(c,r));
+  [[5,2],[7,2]].forEach(([c,r]) => brick(c,r));
+
+  g[1][6] = 3; // enemy base
+  return g;
+}
+
+const SPAWN_SET = new Set(ENEMY_SPAWNS.map(([c,r]) => c + ',' + r).concat([PLAYER_SPAWN[0] + ',' + PLAYER_SPAWN[1]]));
+
+function buildGrid(level) {
+  const g = baseTemplate();
+  const cfg2 = levelConfig(level);
+  const rng = mulberry32(1000 + level * 37);
+  let placed = 0, tries = 0;
+  while (placed < cfg2.extraBricks && tries < 400) {
+    tries++;
+    const c = 1 + Math.floor(rng() * (COLS - 2));
+    const r = 3 + Math.floor(rng() * 7); // rows 3..9
+    if (g[r][c] !== 0) continue;
+    if (SPAWN_SET.has(c + ',' + r)) continue;
+    g[r][c] = 2;
+    placed++;
+  }
+  if (cfg2.steelTierMid) {
+    [[3,6],[9,6]].forEach(([c,r]) => { g[r][c] = 1; });
+  }
+  if (cfg2.steelTierHigh) {
+    [[6,4],[6,8]].forEach(([c,r]) => { g[r][c] = 1; });
+  }
+  return g;
+}
+
+// ---------- Helpers ----------
+function colFromX(x) { return Math.floor(x / TILE); }
+function rowFromY(y) { return Math.floor((y - HUD_H) / TILE); }
+function tileAt(px, py) {
+  const c = colFromX(px), r = rowFromY(py);
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return 1;
+  return grid[r][c];
+}
+function isSolid(t) { return t === 1 || t === 2; }
+
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+function makeTank(col, row, isPlayer, lvlCfg) {
+  return {
+    x: col * TILE + (TILE - 30) / 2,
+    y: row * TILE + HUD_H + (TILE - 30) / 2,
+    w: 30, h: 30,
+    dir: isPlayer ? 'up' : 'down',
+    speed: isPlayer ? 2.6 : lvlCfg.enemySpeed,
+    isPlayer,
+    alive: true,
+    shootCd: 0,
+    aiTimer: 0,
+    shootTimer: lvlCfg.shootMin + Math.random() * (lvlCfg.shootMax - lvlCfg.shootMin),
+    aiMin: lvlCfg.aiMin, aiMax: lvlCfg.aiMax,
+    shootMin: lvlCfg.shootMin, shootMax: lvlCfg.shootMax,
+    invuln: 0
+  };
+}
+
+// ---------- Game state ----------
+let grid, player, enemies, bullets, lives, kills, captureProgress, state, respawnQueue, keyStack, level, cfg;
+let spacePressed = false;
+
+function startLevel(n) {
+  level = n;
+  cfg = levelConfig(level);
+  grid = buildGrid(level);
+  player = makeTank(PLAYER_SPAWN[0], PLAYER_SPAWN[1], true, cfg);
+  player.invuln = PLAYER_INVULN_TIME;
+  enemies = [];
+  for (let i = 0; i < cfg.enemyCount; i++) {
+    const [c, r] = ENEMY_SPAWNS[i % ENEMY_SPAWNS.length];
+    enemies.push(makeTank(c, r, false, cfg));
+  }
+  bullets = [];
+  captureProgress = 0;
+  respawnQueue = 0;
+  state = 'playing';
+}
+
+function resetGame() {
+  lives = MAX_LIVES;
+  kills = 0;
+  keyStack = [];
+  startLevel(1);
+}
+
+function advanceLevel() {
+  if (level >= TOTAL_LEVELS) { state = 'allWon'; return; }
+  startLevel(level + 1);
+}
+
+// ---------- Input ----------
+const KEYMAP = {
+  ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+  KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right'
+};
+
+window.addEventListener('keydown', (e) => {
+  const dir = KEYMAP[e.code];
+  if (dir) { e.preventDefault(); if (!keyStack.includes(dir)) keyStack.push(dir); }
+  if (e.code === 'Space') { e.preventDefault(); spacePressed = true; }
+  if (e.code === 'KeyR') resetGame();
+  if (e.code === 'Enter' || e.code === 'Space') {
+    if (state === 'start' || state === 'lost' || state === 'allWon') resetGame();
+    else if (state === 'levelComplete') advanceLevel();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  const dir = KEYMAP[e.code];
+  if (dir) keyStack = keyStack.filter(d => d !== dir);
+  if (e.code === 'Space') spacePressed = false;
+});
+window.addEventListener('blur', () => { keyStack = []; spacePressed = false; });
+canvas.addEventListener('click', () => {
+  if (state === 'start' || state === 'lost' || state === 'allWon') resetGame();
+  else if (state === 'levelComplete') advanceLevel();
+});
+
+// ---------- Collision ----------
+function canMoveTo(tank, nx, ny, all) {
+  const corners = [
+    [nx, ny], [nx + tank.w - 1, ny],
+    [nx, ny + tank.h - 1], [nx + tank.w - 1, ny + tank.h - 1]
+  ];
+  for (const [px, py] of corners) {
+    if (py < HUD_H) return false;
+    if (isSolid(tileAt(px, py))) return false;
+  }
+  for (const other of all) {
+    if (other === tank || !other.alive) continue;
+    if (nx < other.x + other.w && nx + tank.w > other.x &&
+        ny < other.y + other.h && ny + tank.h > other.y) return false;
+  }
+  return true;
+}
+function allTanks() { return [player, ...enemies.filter(e => e.alive)]; }
+
+// ---------- Bullets ----------
+function shoot(tank) {
+  const d = DIRS[tank.dir];
+  bullets.push({
+    x: tank.x + tank.w / 2 - 3 + d.dx * (tank.w / 2),
+    y: tank.y + tank.h / 2 - 3 + d.dy * (tank.h / 2),
+    dx: d.dx, dy: d.dy, speed: 6, w: 6, h: 6,
+    owner: tank.isPlayer ? 'player' : 'enemy',
+    ownerTank: tank
+  });
+}
+
+function updateBullets() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.dx * b.speed;
+    b.y += b.dy * b.speed;
+
+    const c = colFromX(b.x + b.w / 2), r = rowFromY(b.y + b.h / 2);
+    if (r < 0 || r >= ROWS || c < 0 || c >= COLS || b.y < HUD_H) { bullets.splice(i, 1); continue; }
+    const t = grid[r][c];
+    if (t === 1) { bullets.splice(i, 1); continue; }
+    if (t === 2) { grid[r][c] = 0; bullets.splice(i, 1); continue; }
+
+    if (b.owner === 'player') {
+      for (const en of enemies) {
+        if (!en.alive) continue;
+        if (b.x < en.x + en.w && b.x + b.w > en.x && b.y < en.y + en.h && b.y + b.h > en.y) {
+          en.alive = false; kills++; respawnQueue += ENEMY_RESPAWN_DELAY;
+          bullets.splice(i, 1); break;
+        }
+      }
+    } else {
+      if (player.invuln <= 0 &&
+          b.x < player.x + player.w && b.x + b.w > player.x &&
+          b.y < player.y + player.h && b.y + b.h > player.y) {
+        bullets.splice(i, 1);
+        hitPlayer();
+      }
+    }
+  }
+}
+
+function hitPlayer() {
+  lives--;
+  captureProgress = 0;
+  if (lives <= 0) {
+    state = 'lost';
+  } else {
+    player.x = PLAYER_SPAWN[0] * TILE + (TILE - 30) / 2;
+    player.y = PLAYER_SPAWN[1] * TILE + HUD_H + (TILE - 30) / 2;
+    player.invuln = PLAYER_INVULN_TIME;
+  }
+}
+
+// ---------- AI ----------
+function updateEnemy(en, dt) {
+  en.aiTimer -= dt;
+  if (en.aiTimer <= 0) {
+    const dirs = Object.keys(DIRS);
+    en.dir = dirs[Math.floor(Math.random() * dirs.length)];
+    en.aiTimer = en.aiMin + Math.random() * (en.aiMax - en.aiMin);
+  }
+  const d = DIRS[en.dir];
+  const nx = en.x + d.dx * en.speed, ny = en.y + d.dy * en.speed;
+  if (canMoveTo(en, nx, ny, allTanks())) { en.x = nx; en.y = ny; }
+  else { en.aiTimer = 0; }
+
+  en.shootTimer -= dt;
+  if (en.shootTimer <= 0) {
+    en.shootTimer = en.shootMin + Math.random() * (en.shootMax - en.shootMin);
+    const hasOwnBullet = bullets.some(b => b.ownerTank === en);
+    if (!hasOwnBullet && Math.random() < 0.75) shoot(en);
+  }
+}
+
+// ---------- Main update ----------
+function update(dt) {
+  if (state !== 'playing') return;
+
+  if (player.invuln > 0) player.invuln -= dt;
+
+  if (keyStack.length > 0) {
+    const dir = keyStack[keyStack.length - 1];
+    player.dir = dir;
+    const d = DIRS[dir];
+    const nx = player.x + d.dx * player.speed, ny = player.y + d.dy * player.speed;
+    if (canMoveTo(player, nx, ny, allTanks())) { player.x = nx; player.y = ny; }
+  }
+
+  if (player.shootCd > 0) player.shootCd -= dt;
+  if (spacePressed && player.shootCd <= 0 && !bullets.some(b => b.ownerTank === player)) {
+    shoot(player); player.shootCd = 350;
+  }
+
+  for (const en of enemies) if (en.alive) updateEnemy(en, dt);
+  updateBullets();
+
+  if (respawnQueue > 0) {
+    respawnQueue -= dt;
+    const aliveCount = enemies.filter(e => e.alive).length;
+    if (respawnQueue <= 0 && aliveCount < cfg.enemyCount) {
+      const [c, r] = ENEMY_SPAWNS[Math.floor(Math.random() * ENEMY_SPAWNS.length)];
+      enemies.push(makeTank(c, r, false, cfg));
+      respawnQueue = 0;
+    }
+  }
+
+  const pc = colFromX(player.x + player.w / 2), pr = rowFromY(player.y + player.h / 2);
+  if (pc === BASE_COL && pr === BASE_ROW) {
+    captureProgress += dt;
+    if (captureProgress >= CAPTURE_TIME) {
+      state = (level >= TOTAL_LEVELS) ? 'allWon' : 'levelComplete';
+    }
+  } else {
+    captureProgress = Math.max(0, captureProgress - dt * 1.5);
+  }
+}
+
+// ---------- Drawing ----------
+function drawGrid() {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = c * TILE, y = r * TILE + HUD_H;
+      const t = grid[r][c];
+      if (t === 1) {
+        ctx.fillStyle = '#6d7062'; ctx.fillRect(x, y, TILE, TILE);
+        ctx.strokeStyle = '#4a4e3a'; ctx.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+      } else if (t === 2) {
+        ctx.fillStyle = '#8a5a3a'; ctx.fillRect(x, y, TILE, TILE);
+        ctx.strokeStyle = '#5e3c26'; ctx.lineWidth = 1;
+        ctx.strokeRect(x, y, TILE / 2, TILE / 2);
+        ctx.strokeRect(x + TILE / 2, y, TILE / 2, TILE / 2);
+        ctx.strokeRect(x, y + TILE / 2, TILE / 2, TILE / 2);
+        ctx.strokeRect(x + TILE / 2, y + TILE / 2, TILE / 2, TILE / 2);
+      } else if (t === 3) {
+        ctx.fillStyle = '#2c3320'; ctx.fillRect(x, y, TILE, TILE);
+        ctx.fillStyle = '#d9a441';
+        ctx.beginPath(); ctx.moveTo(x + 12, y + 8); ctx.lineTo(x + 30, y + 14); ctx.lineTo(x + 12, y + 20);
+        ctx.closePath(); ctx.fill();
+        ctx.fillRect(x + 10, y + 8, 2, 26);
+      }
+    }
+  }
+}
+
+const PLAYER_PAL = { hull: '#6f9c5c', hullDark: '#527a44', turret: '#537d43', barrel: '#28311f', track: '#262b1f', treadLine: '#454b3a' };
+const ENEMY_PAL  = { hull: '#a8483f', hullDark: '#7d332c', turret: '#8f3b33', barrel: '#241a17', track: '#241715', treadLine: '#4a3230' };
+
+function drawTank(t, pal) {
+  if (!t.alive) return;
+  if (t.isPlayer && t.invuln > 0 && Math.floor(t.invuln / 100) % 2 === 0) return;
+  const cx = t.x + t.w / 2, cy = t.y + t.h / 2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  const angle = { up: 0, right: Math.PI / 2, down: Math.PI, left: -Math.PI / 2 }[t.dir];
+  ctx.rotate(angle);
+
+  const hw = t.w / 2, hh = t.h / 2, trackW = 6;
+
+  // gусеницы (tracks)
+  ctx.fillStyle = pal.track;
+  ctx.fillRect(-hw - trackW, -hh - 3, trackW, t.h + 6);
+  ctx.fillRect(hw, -hh - 3, trackW, t.h + 6);
+  ctx.strokeStyle = pal.treadLine;
+  ctx.lineWidth = 1;
+  for (let ty = -hh - 3; ty < hh + 3; ty += 4) {
+    ctx.beginPath(); ctx.moveTo(-hw - trackW, ty); ctx.lineTo(-hw, ty); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hw, ty); ctx.lineTo(hw + trackW, ty); ctx.stroke();
+  }
+
+  // корпус (hull)
+  ctx.fillStyle = pal.hull;
+  roundRect(ctx, -hw + 1, -hh + 1, t.w - 2, t.h - 2, 5); ctx.fill();
+  ctx.fillStyle = pal.hullDark;
+  roundRect(ctx, -hw + 3, -hh + 2, t.w - 6, 6, 2); ctx.fill();
+
+  // башня (turret)
+  ctx.fillStyle = pal.turret;
+  ctx.beginPath(); ctx.arc(0, -1, hw * 0.62, 0, Math.PI * 2); ctx.fill();
+
+  // дуло (barrel)
+  ctx.fillStyle = pal.barrel;
+  ctx.fillRect(-2, -hh - 12, 4, 16);
+
+  ctx.restore();
+}
+
+function drawBullets() {
+  ctx.fillStyle = '#f2e9c9';
+  for (const b of bullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#1b1f14';
+  ctx.fillRect(0, 0, canvas.width, HUD_H);
+  ctx.fillStyle = '#e8e4d8';
+  ctx.font = '13px "Courier New", monospace';
+  ctx.textBaseline = 'middle';
+
+  const livesStr = 'Жизни: ' + '▮'.repeat(Math.max(lives, 0)) + '▯'.repeat(MAX_LIVES - Math.max(lives, 0));
+  ctx.fillText(livesStr, 8, HUD_H / 2);
+  ctx.fillText('Ур. ' + level + '/' + TOTAL_LEVELS, 160, HUD_H / 2);
+  ctx.fillText('Врагов: ' + kills, 250, HUD_H / 2);
+
+  const pc = colFromX(player.x + player.w / 2), pr = rowFromY(player.y + player.h / 2);
+  const onBase = pc === BASE_COL && pr === BASE_ROW;
+  if (captureProgress > 0 || onBase) {
+    const bw = 110, bh = 14, bx = canvas.width - bw - 10, by = (HUD_H - bh) / 2;
+    ctx.strokeStyle = '#d9a441'; ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = '#d9a441'; ctx.fillRect(bx, by, bw * (captureProgress / CAPTURE_TIME), bh);
+  }
+}
+
+function drawOverlay(title, subtitle) {
+  ctx.fillStyle = 'rgba(20,23,15,0.85)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#d9a441';
+  ctx.textAlign = 'center';
+  ctx.font = '24px "Courier New", monospace';
+  ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 20);
+  ctx.fillStyle = '#e8e4d8';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2 + 14);
+  ctx.textAlign = 'left';
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawGrid();
+  drawTank(player, PLAYER_PAL);
+  for (const en of enemies) drawTank(en, ENEMY_PAL);
+  drawBullets();
+  drawHUD();
+
+  if (state === 'start') drawOverlay('ЗАХВАТ ШТАБА', '10 уровней, сложность растёт. Enter / клик — начать');
+  if (state === 'levelComplete') drawOverlay('УРОВЕНЬ ' + level + ' ПРОЙДЕН', 'Enter или клик — следующий уровень');
+  if (state === 'lost') drawOverlay('ТАНК УНИЧТОЖЕН', 'Уровень ' + level + ' из ' + TOTAL_LEVELS + '. R / Enter — начать заново');
+  if (state === 'allWon') drawOverlay('ВСЕ 10 УРОВНЕЙ ПРОЙДЕНЫ!', 'Победа! R / Enter — сыграть ещё раз');
+}
+
+// ---------- Loop ----------
+let lastTime = 0;
+function loop(ts) {
+  const dt = lastTime ? ts - lastTime : 16;
+  lastTime = ts;
+  update(Math.min(dt, 40));
+  draw();
+  requestAnimationFrame(loop);
+}
+
+lives = MAX_LIVES; kills = 0; keyStack = [];
+startLevel(1);
+state = 'start';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
