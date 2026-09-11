@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Захват штаба — Танчики</title>
 <style>
   html, body {
@@ -14,19 +14,32 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
   }
   #wrap {
     max-width: 560px;
-    padding: 20px 16px 32px;
+    width: 100%;
+    padding: 16px 12px 28px;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
   }
   h1 {
-    font-size: 21px;
+    font-size: 20px;
     font-weight: normal;
     letter-spacing: 1px;
     color: #d9a441;
-    margin: 0 0 14px;
+    margin: 0 0 12px;
     text-align: center;
+  }
+  #stage {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    touch-action: none;
   }
   canvas {
     background: #232819;
@@ -35,6 +48,64 @@
     image-rendering: pixelated;
     max-width: 100%;
     height: auto;
+    touch-action: none;
+  }
+  #touch-controls { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    #touch-controls { display: block; }
+  }
+  .dpad {
+    position: absolute;
+    left: 3%;
+    bottom: 4%;
+    width: 38%;
+    aspect-ratio: 1 / 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr 1fr;
+    gap: 4%;
+  }
+  .dpad .u { grid-column: 2; grid-row: 1; }
+  .dpad .l { grid-column: 1; grid-row: 2; }
+  .dpad .r { grid-column: 3; grid-row: 2; }
+  .dpad .d { grid-column: 2; grid-row: 3; }
+  .ctrl-btn {
+    background: rgba(217, 164, 65, 0.25);
+    border: 2px solid rgba(217, 164, 65, 0.55);
+    border-radius: 10px;
+    color: #f2e9c9;
+    font-size: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .ctrl-btn.active, .ctrl-btn:active {
+    background: rgba(217, 164, 65, 0.55);
+  }
+  #fireBtn {
+    position: absolute;
+    right: 4%;
+    bottom: 6%;
+    width: 22%;
+    aspect-ratio: 1 / 1;
+    border-radius: 50%;
+    background: rgba(181, 69, 63, 0.35);
+    border: 2px solid rgba(181, 69, 63, 0.75);
+    color: #f2e9c9;
+    font-size: 13px;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #fireBtn.active, #fireBtn:active {
+    background: rgba(181, 69, 63, 0.65);
   }
   #hint {
     font-size: 13px;
@@ -44,14 +115,31 @@
     text-align: center;
   }
   #hint b { color: #cfd2c2; }
+  #hint-touch { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    #hint-keys { display: none; }
+    #hint-touch { display: block; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <h1>ЗАХВАТ ШТАБА — 10 УРОВНЕЙ</h1>
-  <canvas id="game" width="520" height="564"></canvas>
+  <div id="stage">
+    <canvas id="game" width="520" height="564"></canvas>
+    <div id="touch-controls">
+      <div class="dpad">
+        <div class="ctrl-btn u" data-dir="up">▲</div>
+        <div class="ctrl-btn l" data-dir="left">◀</div>
+        <div class="ctrl-btn r" data-dir="right">▶</div>
+        <div class="ctrl-btn d" data-dir="down">▼</div>
+      </div>
+      <div id="fireBtn">ОГОНЬ</div>
+    </div>
+  </div>
   <p id="hint">
-    <b>Стрелки</b> или <b>WASD</b> — движение &nbsp;•&nbsp; <b>Пробел</b> — выстрел &nbsp;•&nbsp; <b>R</b> — начать заново<br>
+    <span id="hint-keys"><b>Стрелки</b> или <b>WASD</b> — движение &nbsp;•&nbsp; <b>Пробел</b> — выстрел &nbsp;•&nbsp; <b>R</b> — начать заново</span>
+    <span id="hint-touch">Стрелки слева — движение, кнопка «ОГОНЬ» справа — выстрел. Чтобы начать заново, коснитесь экрана на стартовом/итоговом экране.</span><br>
     Доберись до жёлтого штаба врага и продержись там до заполнения шкалы захвата. С каждым уровнем врагов больше, они быстрее и злее.
   </p>
 </div>
@@ -105,7 +193,6 @@ function levelConfig(n) {
 }
 
 // ---------- Map ----------
-// Tile types: 0 empty, 1 steel (indestructible), 2 brick (destructible), 3 enemy base
 function baseTemplate() {
   const g = [];
   for (let r = 0; r < ROWS; r++) g.push(new Array(COLS).fill(0));
@@ -123,7 +210,7 @@ function baseTemplate() {
   [[4,1],[8,1],[4,2],[8,2]].forEach(([c,r]) => steel(c,r));
   [[5,2],[7,2]].forEach(([c,r]) => brick(c,r));
 
-  g[1][6] = 3; // enemy base
+  g[1][6] = 3;
   return g;
 }
 
@@ -137,18 +224,14 @@ function buildGrid(level) {
   while (placed < cfg2.extraBricks && tries < 400) {
     tries++;
     const c = 1 + Math.floor(rng() * (COLS - 2));
-    const r = 3 + Math.floor(rng() * 7); // rows 3..9
+    const r = 3 + Math.floor(rng() * 7);
     if (g[r][c] !== 0) continue;
     if (SPAWN_SET.has(c + ',' + r)) continue;
     g[r][c] = 2;
     placed++;
   }
-  if (cfg2.steelTierMid) {
-    [[3,6],[9,6]].forEach(([c,r]) => { g[r][c] = 1; });
-  }
-  if (cfg2.steelTierHigh) {
-    [[6,4],[6,8]].forEach(([c,r]) => { g[r][c] = 1; });
-  }
+  if (cfg2.steelTierMid) [[3,6],[9,6]].forEach(([c,r]) => { g[r][c] = 1; });
+  if (cfg2.steelTierHigh) [[6,4],[6,8]].forEach(([c,r]) => { g[r][c] = 1; });
   return g;
 }
 
@@ -223,7 +306,7 @@ function advanceLevel() {
   startLevel(level + 1);
 }
 
-// ---------- Input ----------
+// ---------- Keyboard input ----------
 const KEYMAP = {
   ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
   KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right'
@@ -249,6 +332,40 @@ canvas.addEventListener('click', () => {
   if (state === 'start' || state === 'lost' || state === 'allWon') resetGame();
   else if (state === 'levelComplete') advanceLevel();
 });
+
+// ---------- Touch / on-screen controls ----------
+(function setupTouchControls() {
+  document.querySelectorAll('.dpad .ctrl-btn').forEach((btn) => {
+    const dir = btn.getAttribute('data-dir');
+    const press = (e) => {
+      e.preventDefault();
+      btn.classList.add('active');
+      if (!keyStack.includes(dir)) keyStack.push(dir);
+    };
+    const release = (e) => {
+      e.preventDefault();
+      btn.classList.remove('active');
+      keyStack = keyStack.filter(d => d !== dir);
+    };
+    btn.addEventListener('pointerdown', press);
+    btn.addEventListener('pointerup', release);
+    btn.addEventListener('pointercancel', release);
+    btn.addEventListener('pointerleave', release);
+  });
+
+  const fireBtn = document.getElementById('fireBtn');
+  const firePress = (e) => { e.preventDefault(); fireBtn.classList.add('active'); spacePressed = true; };
+  const fireRelease = (e) => { e.preventDefault(); fireBtn.classList.remove('active'); spacePressed = false; };
+  fireBtn.addEventListener('pointerdown', firePress);
+  fireBtn.addEventListener('pointerup', fireRelease);
+  fireBtn.addEventListener('pointercancel', fireRelease);
+  fireBtn.addEventListener('pointerleave', fireRelease);
+
+  document.getElementById('stage').addEventListener('pointerdown', () => {
+    if (state === 'start' || state === 'lost' || state === 'allWon') resetGame();
+    else if (state === 'levelComplete') advanceLevel();
+  });
+})();
 
 // ---------- Collision ----------
 function canMoveTo(tank, nx, ny, all) {
@@ -429,7 +546,6 @@ function drawTank(t, pal) {
 
   const hw = t.w / 2, hh = t.h / 2, trackW = 6;
 
-  // gусеницы (tracks)
   ctx.fillStyle = pal.track;
   ctx.fillRect(-hw - trackW, -hh - 3, trackW, t.h + 6);
   ctx.fillRect(hw, -hh - 3, trackW, t.h + 6);
@@ -440,17 +556,14 @@ function drawTank(t, pal) {
     ctx.beginPath(); ctx.moveTo(hw, ty); ctx.lineTo(hw + trackW, ty); ctx.stroke();
   }
 
-  // корпус (hull)
   ctx.fillStyle = pal.hull;
   roundRect(ctx, -hw + 1, -hh + 1, t.w - 2, t.h - 2, 5); ctx.fill();
   ctx.fillStyle = pal.hullDark;
   roundRect(ctx, -hw + 3, -hh + 2, t.w - 6, 6, 2); ctx.fill();
 
-  // башня (turret)
   ctx.fillStyle = pal.turret;
   ctx.beginPath(); ctx.arc(0, -1, hw * 0.62, 0, Math.PI * 2); ctx.fill();
 
-  // дуло (barrel)
   ctx.fillStyle = pal.barrel;
   ctx.fillRect(-2, -hh - 12, 4, 16);
 
@@ -504,10 +617,10 @@ function draw() {
   drawBullets();
   drawHUD();
 
-  if (state === 'start') drawOverlay('ЗАХВАТ ШТАБА', '10 уровней, сложность растёт. Enter / клик — начать');
-  if (state === 'levelComplete') drawOverlay('УРОВЕНЬ ' + level + ' ПРОЙДЕН', 'Enter или клик — следующий уровень');
-  if (state === 'lost') drawOverlay('ТАНК УНИЧТОЖЕН', 'Уровень ' + level + ' из ' + TOTAL_LEVELS + '. R / Enter — начать заново');
-  if (state === 'allWon') drawOverlay('ВСЕ 10 УРОВНЕЙ ПРОЙДЕНЫ!', 'Победа! R / Enter — сыграть ещё раз');
+  if (state === 'start') drawOverlay('ЗАХВАТ ШТАБА', '10 уровней, сложность растёт. Enter / тап — начать');
+  if (state === 'levelComplete') drawOverlay('УРОВЕНЬ ' + level + ' ПРОЙДЕН', 'Enter или тап — следующий уровень');
+  if (state === 'lost') drawOverlay('ТАНК УНИЧТОЖЕН', 'Уровень ' + level + ' из ' + TOTAL_LEVELS + '. R / тап — начать заново');
+  if (state === 'allWon') drawOverlay('ВСЕ 10 УРОВНЕЙ ПРОЙДЕНЫ!', 'Победа! R / тап — сыграть ещё раз');
 }
 
 // ---------- Loop ----------
